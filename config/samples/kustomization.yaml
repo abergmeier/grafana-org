@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- grafana_v1_organization.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
