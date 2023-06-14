@@ -18,14 +18,18 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"net/url"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	grafanav1 "github.com/abergmeier/grafana-org/api/v1"
 	gapi "github.com/grafana/grafana-api-golang-client"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -35,8 +39,7 @@ const (
 // OrganizationReconciler reconciles a Organization object
 type OrganizationReconciler struct {
 	client.Client
-	Scheme  *runtime.Scheme
-	BaseUrl string
+	Scheme *runtime.Scheme
 }
 
 type email string
@@ -53,23 +56,81 @@ type changeUserConfig struct {
 	current gapi.OrgUser
 }
 
-//+kubebuilder:rbac:groups=grafana.abergmeier.github.com,resources=organizations,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=grafana.abergmeier.github.com,resources=organizations/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=grafana.abergmeier.github.com,resources=organizations/finalizers,verbs=update
+//+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	client, err := gapi.New(r.BaseUrl, gapi.Config{})
+	ol := &grafanav1.OrganizationList{}
+	err := r.Client.List(
+		ctx,
+		ol,
+		client.InNamespace(req.Namespace),
+		client.MatchingFields{orgOwnerKey: req.Name},
+	)
 	if err != nil {
 		panic(err)
 	}
 
-	expected, err := r.findExpected(ctx, req)
+	for _, org := range ol.Items {
+		r.reconcileGrafanaOrganization(ctx, req, &org)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) error {
+
+	secret := &corev1.Secret{}
+
+	name := types.NamespacedName{
+		Namespace: req.Namespace,
+		Name:      org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name,
+	}
+	err := r.Client.Get(ctx, name, secret)
 	if err != nil {
-		panic(err)
+		return err
+	}
+
+	username := secret.Data[org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Key]
+
+	name = types.NamespacedName{
+		Namespace: req.Namespace,
+		Name:      org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name,
+	}
+	err = r.Client.Get(ctx, name, secret)
+	if err != nil {
+		return err
+	}
+	password := secret.Data[org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Key]
+
+	username, err = base64.StdEncoding.DecodeString(string(username))
+	if err != nil {
+		return err
+	}
+
+	password, err = base64.StdEncoding.DecodeString(string(password))
+	if err != nil {
+		return err
+	}
+
+	client, err := gapi.New(org.Spec.Url, gapi.Config{
+		BasicAuth: url.UserPassword(string(username), string(password)),
+	})
+	if err != nil {
+		return err
+	}
+
+	username = nil
+	password = nil
+
+	expected, err := r.findExpected(ctx, org)
+	if err != nil {
+		return err
 	}
 
 	currentOrgUsers, err := client.OrgUsersCurrent()
@@ -118,27 +179,16 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	r.removeObsoleteUsers(client, obsoleteOrgUsers)
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
-func (r *OrganizationReconciler) findExpected(ctx context.Context, req ctrl.Request) (map[email]userConfig, error) {
-	ol := &grafanav1.OrganizationList{}
-	err := r.Client.List(
-		ctx,
-		ol,
-		client.InNamespace(req.Namespace),
-		client.MatchingFields{orgOwnerKey: req.Name},
-	)
-	if err != nil {
-		return nil, err
-	}
+func (r *OrganizationReconciler) findExpected(ctx context.Context, org *grafanav1.Organization) (map[email]userConfig, error) {
 
 	expected := map[email]userConfig{}
-	for _, org := range ol.Items {
-		for _, u := range org.Spec.Users {
-			expected[email(u.Email)] = userConfig{
-				role: u.Role,
-			}
+
+	for _, u := range org.Spec.Users {
+		expected[email(u.Email)] = userConfig{
+			role: u.Role,
 		}
 	}
 

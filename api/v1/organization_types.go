@@ -30,7 +30,7 @@ type OrganizationSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Url   string             `json:"url"`
-	Admin GrafanaAdmin       `json:"admin"`
+	Admin *GrafanaAdmin      `json:"admin,omitempty"`
 	Users []OrganizationUser `json:"users,omitempty"`
 }
 
@@ -40,13 +40,20 @@ type GrafanaAdmin struct {
 }
 
 type UsernameSpec struct {
-	SecretKeyRef *corev1.SecretKeySelector `json:"secret_key_ref"`
+	// Optional: Specifies a source the value should come from.
+	// +optional
+	ValueFrom *ValueSource `json:"valueFrom,omitempty"`
 }
 
 type PasswordSpec struct {
-	SecretKeyRef *corev1.SecretKeySelector `json:"secret_key_ref"`
+	// Optional: Specifies a source the value should come from.
+	// +optional
+	ValueFrom *ValueSource `json:"valueFrom,omitempty"`
 }
 
+type ValueSource struct {
+	SecretKeyRef *corev1.SecretKeySelector `json:"secretKeyRef,omitempty"`
+}
 type OrganizationUser struct {
 	Email string `json:"email"`
 	Role  string `json:"role"`
