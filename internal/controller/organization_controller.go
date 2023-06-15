@@ -19,7 +19,10 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/url"
+	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -63,7 +66,7 @@ type changeUserConfig struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	ol := &grafanav1.OrganizationList{}
 	err := r.Client.List(
@@ -73,11 +76,27 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		client.MatchingFields{orgOwnerKey: req.Name},
 	)
 	if err != nil {
-		panic(err)
+		logger.Error(err, "Listing Organization Configurations failed")
+		return ctrl.Result{
+			RequeueAfter: time.Second,
+		}, nil
 	}
 
-	for _, org := range ol.Items {
-		r.reconcileGrafanaOrganization(ctx, req, &org)
+	errs := make([]error, len(ol.Items))
+	wg := sync.WaitGroup{}
+	wg.Add(len(ol.Items))
+	for i, org := range ol.Items {
+		go func(i int, org *grafanav1.Organization) {
+			errs[i] = r.reconcileGrafanaOrganization(ctx, req, org)
+		}(i, &org)
+
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		return ctrl.Result{
+			RequeueAfter: time.Second,
+		}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -85,48 +104,17 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) error {
 
-	secret := &corev1.Secret{}
-
-	name := types.NamespacedName{
-		Namespace: req.Namespace,
-		Name:      org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name,
-	}
-	err := r.Client.Get(ctx, name, secret)
-	if err != nil {
-		return err
-	}
-
-	username := secret.Data[org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Key]
-
-	name = types.NamespacedName{
-		Namespace: req.Namespace,
-		Name:      org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name,
-	}
-	err = r.Client.Get(ctx, name, secret)
-	if err != nil {
-		return err
-	}
-	password := secret.Data[org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Key]
-
-	username, err = base64.StdEncoding.DecodeString(string(username))
-	if err != nil {
-		return err
-	}
-
-	password, err = base64.StdEncoding.DecodeString(string(password))
+	ui, err := r.buildUserInfo(ctx, req, org)
 	if err != nil {
 		return err
 	}
 
 	client, err := gapi.New(org.Spec.Url, gapi.Config{
-		BasicAuth: url.UserPassword(string(username), string(password)),
+		BasicAuth: ui,
 	})
 	if err != nil {
 		return err
 	}
-
-	username = nil
-	password = nil
 
 	expected, err := r.findExpected(ctx, org)
 	if err != nil {
@@ -166,7 +154,10 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 		}
 	}
 
-	r.addMissingUsers(client, missingOrgUsers)
+	err = r.addMissingUsers(client, missingOrgUsers)
+	if err != nil {
+		return err
+	}
 	r.changeUsers(client, changeOrgUsers)
 
 	for _, uc := range missingOrgUsers {
@@ -180,6 +171,43 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 	r.removeObsoleteUsers(client, obsoleteOrgUsers)
 
 	return nil
+}
+
+func (r *OrganizationReconciler) buildUserInfo(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) (*url.Userinfo, error) {
+	secret := &corev1.Secret{}
+
+	name := types.NamespacedName{
+		Namespace: req.Namespace,
+		Name:      org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name,
+	}
+	err := r.Client.Get(ctx, name, secret)
+	if err != nil {
+		return nil, fmt.Errorf("getting secret `%s` failed: %w", org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name, err)
+	}
+
+	username := secret.Data[org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Key]
+
+	name = types.NamespacedName{
+		Namespace: req.Namespace,
+		Name:      org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name,
+	}
+	err = r.Client.Get(ctx, name, secret)
+	if err != nil {
+		return nil, fmt.Errorf("getting secret `%s` failed: %w", org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name, err)
+	}
+	password := secret.Data[org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Key]
+
+	username, err = base64.StdEncoding.DecodeString(string(username))
+	if err != nil {
+		return nil, fmt.Errorf("decoding username failed: %w", err)
+	}
+
+	password, err = base64.StdEncoding.DecodeString(string(password))
+	if err != nil {
+		return nil, fmt.Errorf("decoding password failed: %w", err)
+	}
+
+	return url.UserPassword(string(username), string(password)), nil
 }
 
 func (r *OrganizationReconciler) findExpected(ctx context.Context, org *grafanav1.Organization) (map[email]userConfig, error) {
@@ -202,13 +230,21 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *OrganizationReconciler) addMissingUsers(client *gapi.Client, users []missingUserConfig) {
-	for _, uc := range users {
-		err := client.AddOrgUser(1, string(uc.email), uc.role)
-		if err != nil {
-			panic(err)
-		}
+func (r *OrganizationReconciler) addMissingUsers(client *gapi.Client, users []missingUserConfig) error {
+	wg := sync.WaitGroup{}
+	wg.Add(len(users))
+	errs := make([]error, len(users))
+	for i, uc := range users {
+		go func(i int, uc *missingUserConfig) {
+			defer wg.Done()
+			errs[i] = client.AddOrgUser(1, string(uc.email), uc.role)
+		}(i, &uc)
 	}
+	wg.Wait()
+	for _, err := range errs {
+		return err
+	}
+	return nil
 }
 
 func (r *OrganizationReconciler) changeUsers(client *gapi.Client, users []changeUserConfig) {
