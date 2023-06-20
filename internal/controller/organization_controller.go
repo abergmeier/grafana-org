@@ -35,10 +35,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-const (
-	orgOwnerKey = ".metadata.controller"
-)
-
 // OrganizationReconciler reconciles a Organization object
 type OrganizationReconciler struct {
 	client.Client
@@ -66,34 +62,18 @@ type changeUserConfig struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	_ = log.FromContext(ctx)
 
-	ol := &grafanav1.OrganizationList{}
-	err := r.Client.List(
-		ctx,
-		ol,
-		client.InNamespace(req.Namespace),
-		client.MatchingFields{orgOwnerKey: req.Name},
-	)
+	org := &grafanav1.Organization{}
+	err := r.Client.Get(ctx, req.NamespacedName, org)
 	if err != nil {
-		logger.Error(err, "Listing Organization Configurations failed")
 		return ctrl.Result{
 			RequeueAfter: time.Second,
-		}, nil
+		}, err
 	}
 
-	errs := make([]error, len(ol.Items))
-	wg := sync.WaitGroup{}
-	wg.Add(len(ol.Items))
-	for i, org := range ol.Items {
-		go func(i int, org *grafanav1.Organization) {
-			errs[i] = r.reconcileGrafanaOrganization(ctx, req, org)
-		}(i, &org)
-
-	}
-	wg.Wait()
-
-	for _, err := range errs {
+	err = r.reconcileGrafanaOrganization(ctx, req, org)
+	if err != nil {
 		return ctrl.Result{
 			RequeueAfter: time.Second,
 		}, err
