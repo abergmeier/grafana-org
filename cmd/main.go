@@ -33,6 +33,8 @@ import (
 
 	grafanav1 "github.com/abergmeier/grafana-org/api/v1"
 	"github.com/abergmeier/grafana-org/internal/controller"
+	"github.com/go-logr/zapr"
+	uzap "go.uber.org/zap"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -62,10 +64,14 @@ func main() {
 	opts := zap.Options{
 		Development: true,
 	}
+	opts.DestWriter = os.Stdout
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	zr := zap.NewRaw(zap.UseFlagOptions(&opts))
+	zr = zr.WithOptions(uzap.ErrorOutput(os.Stderr))
+
+	ctrl.SetLogger(zapr.NewLogger(zr))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
