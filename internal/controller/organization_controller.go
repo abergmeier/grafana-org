@@ -137,7 +137,10 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	r.changeUsers(client, changeOrgUsers)
+	err = r.changeUsers(client, changeOrgUsers)
+	if err != nil {
+		return err
+	}
 
 	for _, uc := range missingOrgUsers {
 		delete(obsoleteOrgUsers, uc.email)
@@ -147,7 +150,10 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 		delete(obsoleteOrgUsers, email(uc.current.Email))
 	}
 
-	r.removeObsoleteUsers(client, obsoleteOrgUsers)
+	err = r.removeObsoleteUsers(client, obsoleteOrgUsers)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -211,25 +217,60 @@ func (r *OrganizationReconciler) addMissingUsers(client *gapi.Client, users []mi
 	}
 	wg.Wait()
 	for _, err := range errs {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (r *OrganizationReconciler) changeUsers(client *gapi.Client, users []changeUserConfig) {
-	for _, uc := range users {
-		err := client.UpdateOrgUser(1, uc.current.UserID, uc.role)
+func (r *OrganizationReconciler) changeUsers(client *gapi.Client, users []changeUserConfig) error {
+	wg := sync.WaitGroup{}
+	wg.Add(len(users))
+	errs := make([]error, len(users))
+	for i, uc := range users {
+		go func(i int, uc *changeUserConfig) {
+			defer wg.Done()
+			errs[i] = client.UpdateOrgUser(1, uc.current.UserID, uc.role)
+		}(i, &uc)
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
-			panic(err)
+			return err
 		}
 	}
+	return nil
 }
 
-func (r *OrganizationReconciler) removeObsoleteUsers(client *gapi.Client, users map[email]gapi.OrgUser) {
+type orgUserId struct {
+	OrgID  int64
+	UserID int64
+}
+
+func (r *OrganizationReconciler) removeObsoleteUsers(client *gapi.Client, users map[email]gapi.OrgUser) error {
+	uids := make([]orgUserId, 0, len(users))
 	for _, uc := range users {
-		err := client.RemoveOrgUser(1, uc.UserID)
+		uids = append(uids, orgUserId{
+			OrgID:  uc.OrgID,
+			UserID: uc.UserID,
+		})
+	}
+
+	wg := sync.WaitGroup{}
+	wg.Add(len(uids))
+	errs := make([]error, len(uids))
+	for i, uid := range uids {
+		go func(i int, uid *orgUserId) {
+			defer wg.Done()
+			errs[i] = client.RemoveOrgUser(uid.OrgID, uid.UserID)
+		}(i, &uid)
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
-			panic(err)
+			return err
 		}
 	}
+	return nil
 }
