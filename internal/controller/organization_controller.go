@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/url"
 	"sync"
@@ -176,16 +175,6 @@ func (r *OrganizationReconciler) buildUserInfo(ctx context.Context, req ctrl.Req
 		return nil, fmt.Errorf("getting secret `%s` failed: %w", org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name, err)
 	}
 	password := secret.Data[org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Key]
-
-	username, err = base64.StdEncoding.DecodeString(string(username))
-	if err != nil {
-		return nil, fmt.Errorf("decoding username failed: %w", err)
-	}
-
-	password, err = base64.StdEncoding.DecodeString(string(password))
-	if err != nil {
-		return nil, fmt.Errorf("decoding password failed: %w", err)
-	}
 
 	return url.UserPassword(string(username), string(password)), nil
 }
