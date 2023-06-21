@@ -85,74 +85,38 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 
 	ui, err := r.buildUserInfo(ctx, req, org)
 	if err != nil {
-		return err
+		return fmt.Errorf("extracting user credentials failed: %w", err)
 	}
 
 	client, err := gapi.New(org.Spec.Url, gapi.Config{
 		BasicAuth: ui,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("creating Grafana Client failed: %w", err)
 	}
 
-	expected, err := r.findExpected(ctx, org)
+	desired, err := r.findDesired(ctx, org)
 	if err != nil {
-		return err
+		return fmt.Errorf("finding desired state failed: %w", err)
 	}
 
-	currentOrgUsers, err := client.OrgUsersCurrent()
+	userActions, err := calculateUserBuckets(client, desired)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("calculating diff failed: %w", err)
 	}
 
-	currentOrgUserMap := map[email]gapi.OrgUser{}
-	obsoleteOrgUsers := map[email]gapi.OrgUser{}
-
-	for _, ou := range currentOrgUsers {
-		currentOrgUserMap[email(ou.Email)] = ou
-		obsoleteOrgUsers[email(ou.Email)] = ou
-	}
-
-	missingOrgUsers := []missingUserConfig{}
-	changeOrgUsers := []changeUserConfig{}
-
-	for email, uc := range expected {
-		alreadyPresentConfig, ok := currentOrgUserMap[email]
-		if !ok {
-			missingOrgUsers = append(missingOrgUsers, missingUserConfig{
-				email:      email,
-				userConfig: uc,
-			})
-			continue
-		}
-
-		if uc.role != alreadyPresentConfig.Role {
-			changeOrgUsers = append(changeOrgUsers, changeUserConfig{
-				userConfig: uc,
-			})
-		}
-	}
-
-	err = r.addMissingUsers(client, missingOrgUsers)
+	err = r.addMissingUsers(client, userActions.missing)
 	if err != nil {
-		return err
+		return fmt.Errorf("add missing users failed: %w", err)
 	}
-	err = r.changeUsers(client, changeOrgUsers)
+	err = r.changeUsers(client, userActions.change)
 	if err != nil {
-		return err
+		return fmt.Errorf("changing present users failed: %w", err)
 	}
 
-	for _, uc := range missingOrgUsers {
-		delete(obsoleteOrgUsers, uc.email)
-	}
-
-	for _, uc := range changeOrgUsers {
-		delete(obsoleteOrgUsers, email(uc.current.Email))
-	}
-
-	err = r.removeObsoleteUsers(client, obsoleteOrgUsers)
+	err = r.removeObsoleteUsers(client, userActions.obsolete)
 	if err != nil {
-		return err
+		return fmt.Errorf("remove obsolete users failed: %w", err)
 	}
 
 	return nil
@@ -185,7 +149,7 @@ func (r *OrganizationReconciler) buildUserInfo(ctx context.Context, req ctrl.Req
 	return url.UserPassword(string(username), string(password)), nil
 }
 
-func (r *OrganizationReconciler) findExpected(ctx context.Context, org *grafanav1.Organization) (map[email]userConfig, error) {
+func (r *OrganizationReconciler) findDesired(ctx context.Context, org *grafanav1.Organization) (map[email]userConfig, error) {
 
 	expected := map[email]userConfig{}
 
@@ -273,4 +237,55 @@ func (r *OrganizationReconciler) removeObsoleteUsers(client *gapi.Client, users 
 		}
 	}
 	return nil
+}
+
+type orgUserBuckets struct {
+	missing  []missingUserConfig
+	change   []changeUserConfig
+	obsolete map[email]gapi.OrgUser
+}
+
+func calculateUserBuckets(client *gapi.Client, expected map[email]userConfig) (*orgUserBuckets, error) {
+	currentOrgUsers, err := client.OrgUsersCurrent()
+	if err != nil {
+		return nil, err
+	}
+
+	users := &orgUserBuckets{
+		obsolete: map[email]gapi.OrgUser{},
+	}
+
+	currentOrgUserMap := map[email]gapi.OrgUser{}
+
+	for _, ou := range currentOrgUsers {
+		currentOrgUserMap[email(ou.Email)] = ou
+		users.obsolete[email(ou.Email)] = ou
+	}
+
+	for email, uc := range expected {
+		alreadyPresentConfig, ok := currentOrgUserMap[email]
+		if !ok {
+			users.missing = append(users.missing, missingUserConfig{
+				email:      email,
+				userConfig: uc,
+			})
+			continue
+		}
+
+		if uc.role != alreadyPresentConfig.Role {
+			users.change = append(users.change, changeUserConfig{
+				userConfig: uc,
+			})
+		}
+	}
+
+	for _, uc := range users.missing {
+		delete(users.obsolete, uc.email)
+	}
+
+	for _, uc := range users.change {
+		delete(users.obsolete, email(uc.current.Email))
+	}
+
+	return users, nil
 }
