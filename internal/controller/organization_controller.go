@@ -61,7 +61,6 @@ type changeUserConfig struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
 
 	org := &grafanav1.Organization{}
 	err := r.Client.Get(ctx, req.NamespacedName, org)
@@ -105,16 +104,16 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 		return fmt.Errorf("calculating diff failed: %w", err)
 	}
 
-	err = r.addMissingUsers(client, userActions.missing)
+	err = r.addMissingUsers(ctx, client, userActions.missing)
 	if err != nil {
 		return fmt.Errorf("add missing users failed: %w", err)
 	}
-	err = r.changeUsers(client, userActions.change)
+	err = r.changeUsers(ctx, client, userActions.change)
 	if err != nil {
 		return fmt.Errorf("changing present users failed: %w", err)
 	}
 
-	err = r.removeObsoleteUsers(client, userActions.obsolete)
+	err = r.removeObsoleteUsers(ctx, client, userActions.obsolete)
 	if err != nil {
 		return fmt.Errorf("remove obsolete users failed: %w", err)
 	}
@@ -169,7 +168,9 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *OrganizationReconciler) addMissingUsers(client *gapi.Client, users []missingUserConfig) error {
+func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *gapi.Client, users []missingUserConfig) error {
+	logger := log.FromContext(ctx)
+
 	wg := sync.WaitGroup{}
 	wg.Add(len(users))
 	errs := make([]error, len(users))
@@ -180,15 +181,24 @@ func (r *OrganizationReconciler) addMissingUsers(client *gapi.Client, users []mi
 		}(i, &uc)
 	}
 	wg.Wait()
+	unreturned := make([]error, 0, len(errs))
 	for _, err := range errs {
 		if err != nil {
-			return err
+			unreturned = append(unreturned, err)
 		}
+	}
+	if len(unreturned) >= 1 {
+		for _, err := range unreturned[1:] {
+			logger.Error(err, "add user to org failed", "orgid", 1)
+		}
+		return unreturned[0]
 	}
 	return nil
 }
 
-func (r *OrganizationReconciler) changeUsers(client *gapi.Client, users []changeUserConfig) error {
+func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.Client, users []changeUserConfig) error {
+	logger := log.FromContext(ctx)
+
 	wg := sync.WaitGroup{}
 	wg.Add(len(users))
 	errs := make([]error, len(users))
@@ -199,10 +209,17 @@ func (r *OrganizationReconciler) changeUsers(client *gapi.Client, users []change
 		}(i, &uc)
 	}
 	wg.Wait()
+	unreturned := make([]error, 0, len(errs))
 	for _, err := range errs {
 		if err != nil {
-			return err
+			unreturned = append(unreturned, err)
 		}
+	}
+	if len(unreturned) >= 1 {
+		for _, err := range unreturned[1:] {
+			logger.Error(err, "change user in org failed", "orgid", 1)
+		}
+		return unreturned[0]
 	}
 	return nil
 }
@@ -212,7 +229,9 @@ type orgUserId struct {
 	UserID int64
 }
 
-func (r *OrganizationReconciler) removeObsoleteUsers(client *gapi.Client, users map[email]gapi.OrgUser) error {
+func (r *OrganizationReconciler) removeObsoleteUsers(ctx context.Context, client *gapi.Client, users map[email]gapi.OrgUser) error {
+	logger := log.FromContext(ctx)
+
 	uids := make([]orgUserId, 0, len(users))
 	for _, uc := range users {
 		uids = append(uids, orgUserId{
@@ -231,10 +250,17 @@ func (r *OrganizationReconciler) removeObsoleteUsers(client *gapi.Client, users 
 		}(i, &uid)
 	}
 	wg.Wait()
+	unreturned := make([]error, 0, len(errs))
 	for _, err := range errs {
 		if err != nil {
-			return err
+			unreturned = append(unreturned, err)
 		}
+	}
+	if len(unreturned) >= 1 {
+		for _, err := range unreturned[1:] {
+			logger.Error(err, "removing user from org failed", "orgid", 1)
+		}
+		return unreturned[0]
 	}
 	return nil
 }
