@@ -47,6 +47,7 @@ type userConfig struct {
 type missingUserConfig struct {
 	userConfig
 	email email
+	OrgID int64
 }
 
 type changeUserConfig struct {
@@ -168,32 +169,54 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+type orgUserAddError struct {
+	error
+	Email email
+	OrgID int64
+}
+
+func (err *orgUserAddError) Error() string {
+	return fmt.Sprintf("adding User (email: %s) to Organization (id: %d) failed", err.Email, err.OrgID)
+}
+
 func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *gapi.Client, users []missingUserConfig) error {
 	logger := log.FromContext(ctx)
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(users))
-	errs := make([]error, len(users))
+	errs := make([]*orgUserAddError, len(users))
 	for i, uc := range users {
 		go func(i int, uc *missingUserConfig) {
 			defer wg.Done()
-			errs[i] = client.AddOrgUser(1, string(uc.email), uc.role)
+			err := client.AddOrgUser(uc.OrgID, string(uc.email), uc.role)
+			if err == nil {
+				return
+			}
+			errs[i] = &orgUserAddError{
+				error: err,
+				Email: uc.email,
+				OrgID: uc.OrgID,
+			}
 		}(i, &uc)
 	}
 	wg.Wait()
-	unreturned := make([]error, 0, len(errs))
-	for _, err := range errs {
-		if err != nil {
-			unreturned = append(unreturned, err)
-		}
-	}
+	unreturned := filterNilOrgUserAddErrors(errs)
 	if len(unreturned) >= 1 {
 		for _, err := range unreturned[1:] {
-			logger.Error(err, "add user to org failed", "orgid", 1)
+			logger.Error(err.error, "adding User to Organization failed", "orgid", err.OrgID, "email", err.Email)
 		}
 		return unreturned[0]
 	}
 	return nil
+}
+
+type orgUserError struct {
+	error
+	orgUserId
+}
+
+func (err *orgUserError) Error() string {
+	return fmt.Sprintf("operation on User (id: %d) in Organization (id: %d) failed: %s", err.UserID, err.OrgID, err.error)
 }
 
 func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.Client, users []changeUserConfig) error {
@@ -201,25 +224,30 @@ func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.C
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(users))
-	errs := make([]error, len(users))
+	errs := make([]*orgUserError, len(users))
 	for i, uc := range users {
 		go func(i int, uc *changeUserConfig) {
 			defer wg.Done()
-			errs[i] = client.UpdateOrgUser(1, uc.current.UserID, uc.role)
+			err := client.UpdateOrgUser(uc.current.OrgID, uc.current.UserID, uc.role)
+			if err == nil {
+				return
+			}
+			errs[i] = &orgUserError{
+				error: err,
+				orgUserId: orgUserId{
+					OrgID:  uc.current.OrgID,
+					UserID: uc.current.UserID,
+				},
+			}
 		}(i, &uc)
 	}
 	wg.Wait()
-	unreturned := make([]error, 0, len(errs))
-	for _, err := range errs {
-		if err != nil {
-			unreturned = append(unreturned, err)
-		}
-	}
+	unreturned := filterNilOrgUserErrors(errs)
 	if len(unreturned) >= 1 {
 		for _, err := range unreturned[1:] {
-			logger.Error(err, "change user in org failed", "orgid", 1)
+			logger.Error(err.error, "changing User in Organization failed", "orgid", err.OrgID, "userid", err.UserID)
 		}
-		return unreturned[0]
+		return fmt.Errorf("changing User in Organization failed: %w", unreturned[0])
 	}
 	return nil
 }
@@ -242,25 +270,28 @@ func (r *OrganizationReconciler) removeObsoleteUsers(ctx context.Context, client
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(uids))
-	errs := make([]error, len(uids))
+	errs := make([]*orgUserError, len(uids))
 	for i, uid := range uids {
 		go func(i int, uid *orgUserId) {
 			defer wg.Done()
-			errs[i] = client.RemoveOrgUser(uid.OrgID, uid.UserID)
+			err := client.RemoveOrgUser(uid.OrgID, uid.UserID)
+			if err == nil {
+				return
+			}
+			errs[i] = &orgUserError{
+				error:     err,
+				orgUserId: *uid,
+			}
+
 		}(i, &uid)
 	}
 	wg.Wait()
-	unreturned := make([]error, 0, len(errs))
-	for _, err := range errs {
-		if err != nil {
-			unreturned = append(unreturned, err)
-		}
-	}
+	unreturned := filterNilOrgUserErrors(errs)
 	if len(unreturned) >= 1 {
 		for _, err := range unreturned[1:] {
-			logger.Error(err, "removing user from org failed", "orgid", 1)
+			logger.Error(err.error, "removing User from Organization failed", "orgid", err.OrgID, "userid", err.UserID)
 		}
-		return unreturned[0]
+		return fmt.Errorf("removing User from Organization failed: %w", unreturned[0])
 	}
 	return nil
 }
@@ -294,6 +325,7 @@ func calculateUserBuckets(client *gapi.Client, expected map[email]userConfig) (*
 			users.missing = append(users.missing, missingUserConfig{
 				email:      email,
 				userConfig: uc,
+				OrgID:      1,
 			})
 			continue
 		}
@@ -314,4 +346,24 @@ func calculateUserBuckets(client *gapi.Client, expected map[email]userConfig) (*
 	}
 
 	return users, nil
+}
+
+func filterNilOrgUserErrors(errs []*orgUserError) []*orgUserError {
+	filtered := make([]*orgUserError, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			filtered = append(filtered, err)
+		}
+	}
+	return filtered
+}
+
+func filterNilOrgUserAddErrors(errs []*orgUserAddError) []*orgUserAddError {
+	filtered := make([]*orgUserAddError, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			filtered = append(filtered, err)
+		}
+	}
+	return filtered
 }
