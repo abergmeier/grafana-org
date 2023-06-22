@@ -176,7 +176,7 @@ type orgUserAddError struct {
 }
 
 func (err *orgUserAddError) Error() string {
-	return fmt.Sprintf("adding User (email: %s) to Organization (id: %d) failed", err.Email, err.OrgID)
+	return fmt.Sprintf("adding User (email: %s) to Organization (id: %d) failed: %s", err.Email, err.OrgID, err.error)
 }
 
 func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *gapi.Client, users []missingUserConfig) error {
