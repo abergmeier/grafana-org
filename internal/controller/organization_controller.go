@@ -19,19 +19,17 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	grafanav1 "github.com/abergmeier/grafana-org/api/v1"
+	"github.com/abergmeier/grafana-org/internal"
 	gapi "github.com/grafana/grafana-api-golang-client"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // OrganizationReconciler reconciles a Organization object
@@ -46,8 +44,7 @@ type userConfig struct {
 }
 type missingUserConfig struct {
 	userConfig
-	email email
-	OrgID int64
+	gapi.User
 }
 
 type changeUserConfig struct {
@@ -83,7 +80,7 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) error {
 
-	ui, err := r.buildUserInfo(ctx, req, org)
+	ui, err := internal.BuildRequestUserInfo(ctx, r.Client, req.Namespace, org.Spec.Admin)
 	if err != nil {
 		return fmt.Errorf("extracting user credentials failed: %w", err)
 	}
@@ -95,12 +92,12 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 		return fmt.Errorf("creating Grafana Client failed: %w", err)
 	}
 
-	desired, err := r.findDesired(ctx, org)
+	desiredState, err := r.buildDesiredState(ctx, org)
 	if err != nil {
 		return fmt.Errorf("finding desired state failed: %w", err)
 	}
 
-	userActions, err := calculateUserBuckets(client, desired)
+	userActions, err := calculateOrgUserBuckets(client, ui.Username(), desiredState)
 	if err != nil {
 		return fmt.Errorf("calculating diff failed: %w", err)
 	}
@@ -114,7 +111,7 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 		return fmt.Errorf("changing present users failed: %w", err)
 	}
 
-	err = r.removeObsoleteUsers(ctx, client, userActions.obsolete)
+	err = r.removeObsoleteUsers(ctx, client, userActions.obsoleteIds)
 	if err != nil {
 		return fmt.Errorf("remove obsolete users failed: %w", err)
 	}
@@ -122,41 +119,12 @@ func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Contex
 	return nil
 }
 
-func (r *OrganizationReconciler) buildUserInfo(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) (*url.Userinfo, error) {
-	secret := &corev1.Secret{}
+func (r *OrganizationReconciler) buildDesiredState(ctx context.Context, org *grafanav1.Organization) (map[email]grafanav1.OrganizationUser, error) {
 
-	name := types.NamespacedName{
-		Namespace: req.Namespace,
-		Name:      org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name,
-	}
-	err := r.Client.Get(ctx, name, secret)
-	if err != nil {
-		return nil, fmt.Errorf("getting secret `%s` failed: %w", org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Name, err)
-	}
-
-	username := secret.Data[org.Spec.Admin.Username.ValueFrom.SecretKeyRef.Key]
-
-	name = types.NamespacedName{
-		Namespace: req.Namespace,
-		Name:      org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name,
-	}
-	err = r.Client.Get(ctx, name, secret)
-	if err != nil {
-		return nil, fmt.Errorf("getting secret `%s` failed: %w", org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Name, err)
-	}
-	password := secret.Data[org.Spec.Admin.Password.ValueFrom.SecretKeyRef.Key]
-
-	return url.UserPassword(string(username), string(password)), nil
-}
-
-func (r *OrganizationReconciler) findDesired(ctx context.Context, org *grafanav1.Organization) (map[email]userConfig, error) {
-
-	expected := map[email]userConfig{}
+	expected := map[email]grafanav1.OrganizationUser{}
 
 	for _, u := range org.Spec.Users {
-		expected[email(u.Email)] = userConfig{
-			role: u.Role,
-		}
+		expected[email(u.Email)] = u
 	}
 
 	return expected, nil
@@ -189,29 +157,22 @@ func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *ga
 		go func(i int, uc *missingUserConfig) {
 			defer wg.Done()
 
-			_, err := client.CreateUser(gapi.User{
-				Email: string(uc.email),
-				Name:  string(uc.email),
-				Login: string(uc.email),
-			})
+			_, err := client.UserByEmail(string(uc.Email))
 			if err != nil {
-				errs[i] = &orgUserAddError{
-					error: err,
-					Email: uc.email,
-					OrgID: uc.OrgID,
-				}
+				// Need to have a user first to try to add to Org
 				return
 			}
 
-			err = client.AddOrgUser(uc.OrgID, string(uc.email), uc.role)
+			err = client.AddOrgUser(uc.OrgID, string(uc.Email), uc.role)
 			if err != nil {
 				errs[i] = &orgUserAddError{
 					error: err,
-					Email: uc.email,
+					Email: email(uc.Email),
 					OrgID: uc.OrgID,
 				}
 				return
 			}
+			logger.Info("Added User to Organization", "orgid", uc.OrgID, "email", uc.Email)
 		}(i, &uc)
 	}
 	wg.Wait()
@@ -228,41 +189,44 @@ func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *ga
 type orgUserError struct {
 	error
 	orgUserId
+	Email string
 }
 
 func (err *orgUserError) Error() string {
-	return fmt.Sprintf("operation on User (id: %d) in Organization (id: %d) failed: %s", err.UserID, err.OrgID, err.error)
+	return fmt.Sprintf("operation on User (email: %d) in Organization (id: %d) failed: %s", err.Email, err.OrgID, err.error)
 }
 
-func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.Client, users []changeUserConfig) error {
+func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.Client, users []gapi.OrgUser) error {
 	logger := log.FromContext(ctx)
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(users))
 	errs := make([]*orgUserError, len(users))
-	for i, uc := range users {
-		go func(i int, uc *changeUserConfig) {
+	for i, ou := range users {
+		go func(i int, ou gapi.OrgUser) {
 			defer wg.Done()
-			err := client.UpdateOrgUser(uc.current.OrgID, uc.current.UserID, uc.role)
-			if err == nil {
+			err := client.UpdateOrgUser(ou.OrgID, ou.UserID, ou.Role)
+			if err != nil {
+				errs[i] = &orgUserError{
+					error: err,
+					orgUserId: orgUserId{
+						OrgID:  ou.OrgID,
+						UserID: ou.UserID,
+					},
+					Email: ou.Email,
+				}
 				return
 			}
-			errs[i] = &orgUserError{
-				error: err,
-				orgUserId: orgUserId{
-					OrgID:  uc.current.OrgID,
-					UserID: uc.current.UserID,
-				},
-			}
-		}(i, &uc)
+			logger.Info("Updated User in Organization", "orgid", ou.OrgID, "email", ou.Email)
+		}(i, ou)
 	}
 	wg.Wait()
 	unreturned := filterNilOrgUserErrors(errs)
 	if len(unreturned) >= 1 {
 		for _, err := range unreturned[1:] {
-			logger.Error(err.error, "changing User in Organization failed", "orgid", err.OrgID, "userid", err.UserID)
+			logger.Error(err.error, "updating User in Organization failed", "orgid", err.OrgID, "email", err.Email)
 		}
-		return fmt.Errorf("changing User in Organization failed: %w", unreturned[0])
+		return fmt.Errorf("updating User in Organization failed: %w", unreturned[0])
 	}
 	return nil
 }
@@ -272,33 +236,25 @@ type orgUserId struct {
 	UserID int64
 }
 
-func (r *OrganizationReconciler) removeObsoleteUsers(ctx context.Context, client *gapi.Client, users map[email]gapi.OrgUser) error {
+func (r *OrganizationReconciler) removeObsoleteUsers(ctx context.Context, client *gapi.Client, userIds []orgUserId) error {
 	logger := log.FromContext(ctx)
 
-	uids := make([]orgUserId, 0, len(users))
-	for _, uc := range users {
-		uids = append(uids, orgUserId{
-			OrgID:  uc.OrgID,
-			UserID: uc.UserID,
-		})
-	}
-
 	wg := sync.WaitGroup{}
-	wg.Add(len(uids))
-	errs := make([]*orgUserError, len(uids))
-	for i, uid := range uids {
-		go func(i int, uid *orgUserId) {
+	wg.Add(len(userIds))
+	errs := make([]*orgUserError, len(userIds))
+	for i, uid := range userIds {
+		go func(i int, uid orgUserId) {
 			defer wg.Done()
 			err := client.RemoveOrgUser(uid.OrgID, uid.UserID)
-			if err == nil {
+			if err != nil {
+				errs[i] = &orgUserError{
+					error:     err,
+					orgUserId: uid,
+				}
 				return
 			}
-			errs[i] = &orgUserError{
-				error:     err,
-				orgUserId: *uid,
-			}
-
-		}(i, &uid)
+			logger.Info("Removed User from Organization", "orgid", uid.OrgID, "userid", uid.UserID)
+		}(i, uid)
 	}
 	wg.Wait()
 	unreturned := filterNilOrgUserErrors(errs)
@@ -312,52 +268,62 @@ func (r *OrganizationReconciler) removeObsoleteUsers(ctx context.Context, client
 }
 
 type orgUserBuckets struct {
-	missing  []missingUserConfig
-	change   []changeUserConfig
-	obsolete map[email]gapi.OrgUser
+	missing     []missingUserConfig
+	change      []gapi.OrgUser
+	obsoleteIds []orgUserId
 }
 
-func calculateUserBuckets(client *gapi.Client, expected map[email]userConfig) (*orgUserBuckets, error) {
+func calculateOrgUserBuckets(client *gapi.Client, adminLogin string, desired map[email]grafanav1.OrganizationUser) (*orgUserBuckets, error) {
 	currentOrgUsers, err := client.OrgUsersCurrent()
 	if err != nil {
 		return nil, err
 	}
 
-	users := &orgUserBuckets{
-		obsolete: map[email]gapi.OrgUser{},
-	}
+	users := &orgUserBuckets{}
+
+	obsoleteByEmail := map[string]gapi.OrgUser{}
 
 	currentOrgUserMap := map[email]gapi.OrgUser{}
 
 	for _, ou := range currentOrgUsers {
+		// Excempt from changing admin
+		// Grafana has no strategy to handle these cases properly
+		if ou.Login == adminLogin || ou.Email == adminLogin {
+			continue
+		}
 		currentOrgUserMap[email(ou.Email)] = ou
-		users.obsolete[email(ou.Email)] = ou
+		obsoleteByEmail[ou.Email] = ou
 	}
 
-	for email, uc := range expected {
-		alreadyPresentConfig, ok := currentOrgUserMap[email]
+	for email, uc := range desired {
+		alreadyPresentUser, ok := currentOrgUserMap[email]
 		if !ok {
 			users.missing = append(users.missing, missingUserConfig{
-				email:      email,
-				userConfig: uc,
-				OrgID:      1,
+				User: gapi.User{
+					Email: string(email),
+					OrgID: 1,
+				},
+				userConfig: userConfig{
+					role: uc.Role,
+				},
 			})
 			continue
 		}
 
-		if uc.role != alreadyPresentConfig.Role {
-			users.change = append(users.change, changeUserConfig{
-				userConfig: uc,
-			})
+		delete(obsoleteByEmail, uc.Email)
+
+		if uc.Role != alreadyPresentUser.Role {
+			changed := alreadyPresentUser
+			changed.Role = uc.Role
+			users.change = append(users.change, changed)
 		}
 	}
 
-	for _, uc := range users.missing {
-		delete(users.obsolete, uc.email)
-	}
-
-	for _, uc := range users.change {
-		delete(users.obsolete, email(uc.current.Email))
+	for _, u := range obsoleteByEmail {
+		users.obsoleteIds = append(users.obsoleteIds, orgUserId{
+			OrgID:  u.OrgID,
+			UserID: u.UserID,
+		})
 	}
 
 	return users, nil

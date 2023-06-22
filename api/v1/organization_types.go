@@ -26,7 +26,6 @@ import (
 
 // OrganizationSpec defines the desired state of Organization
 type OrganizationSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Url   string             `json:"url"`

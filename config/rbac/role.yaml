@@ -31,3 +31,29 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - grafana.abergmeier.github.io
+  resources:
+  - users
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - grafana.abergmeier.github.io
+  resources:
+  - users/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - grafana.abergmeier.github.io
+  resources:
+  - users/status
+  verbs:
+  - get
+  - patch
+  - update

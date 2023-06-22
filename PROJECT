@@ -12,9 +12,18 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: my.domain
+  domain: grafana.abergmeier.github.io
   group: grafana
   kind: Organization
+  path: github.com/abergmeier/grafana-org/api/v1
+  version: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: grafana.abergmeier.github.io
+  group: grafana
+  kind: Users
   path: github.com/abergmeier/grafana-org/api/v1
   version: v1
 version: "3"
