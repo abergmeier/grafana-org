@@ -188,14 +188,29 @@ func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *ga
 	for i, uc := range users {
 		go func(i int, uc *missingUserConfig) {
 			defer wg.Done()
-			err := client.AddOrgUser(uc.OrgID, string(uc.email), uc.role)
-			if err == nil {
+
+			_, err := client.CreateUser(gapi.User{
+				Email: string(uc.email),
+				Name:  string(uc.email),
+				Login: string(uc.email),
+			})
+			if err != nil {
+				errs[i] = &orgUserAddError{
+					error: err,
+					Email: uc.email,
+					OrgID: uc.OrgID,
+				}
 				return
 			}
-			errs[i] = &orgUserAddError{
-				error: err,
-				Email: uc.email,
-				OrgID: uc.OrgID,
+
+			err = client.AddOrgUser(uc.OrgID, string(uc.email), uc.role)
+			if err != nil {
+				errs[i] = &orgUserAddError{
+					error: err,
+					Email: uc.email,
+					OrgID: uc.OrgID,
+				}
+				return
 			}
 		}(i, &uc)
 	}
