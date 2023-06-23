@@ -47,11 +47,6 @@ type missingUserConfig struct {
 	gapi.User
 }
 
-type changeUserConfig struct {
-	userConfig
-	current gapi.OrgUser
-}
-
 //+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=grafana.abergmeier.github.io,resources=organizations/finalizers,verbs=update
@@ -193,7 +188,7 @@ type orgUserError struct {
 }
 
 func (err *orgUserError) Error() string {
-	return fmt.Sprintf("operation on User (email: %d) in Organization (id: %d) failed: %s", err.Email, err.OrgID, err.error)
+	return fmt.Sprintf("operation on User (email: %s) in Organization (id: %d) failed: %s", err.Email, err.OrgID, err.error)
 }
 
 func (r *OrganizationReconciler) changeUsers(ctx context.Context, client *gapi.Client, users []gapi.OrgUser) error {
