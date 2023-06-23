@@ -63,8 +63,8 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}, err
 	}
 
-	err = r.reconcileGrafanaOrganization(ctx, req, org)
-	if err != nil {
+	retry, err := r.reconcileGrafanaOrganization(ctx, req, org)
+	if err != nil || retry {
 		return ctrl.Result{
 			RequeueAfter: time.Second,
 		}, err
@@ -73,45 +73,46 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) error {
+func (r *OrganizationReconciler) reconcileGrafanaOrganization(ctx context.Context, req ctrl.Request, org *grafanav1.Organization) (retry bool, err error) {
 
 	ui, err := internal.BuildRequestUserInfo(ctx, r.Client, req.Namespace, org.Spec.Admin)
 	if err != nil {
-		return fmt.Errorf("extracting user credentials failed: %w", err)
+		return true, fmt.Errorf("extracting user credentials failed: %w", err)
 	}
 
 	client, err := gapi.New(org.Spec.Url, gapi.Config{
 		BasicAuth: ui,
 	})
 	if err != nil {
-		return fmt.Errorf("creating Grafana Client failed: %w", err)
+		return true, fmt.Errorf("creating Grafana Client failed: %w", err)
 	}
 
 	desiredState, err := r.buildDesiredState(ctx, org)
 	if err != nil {
-		return fmt.Errorf("finding desired state failed: %w", err)
+		return true, fmt.Errorf("finding desired state failed: %w", err)
 	}
 
 	userActions, err := calculateOrgUserBuckets(client, ui.Username(), desiredState)
 	if err != nil {
-		return fmt.Errorf("calculating diff failed: %w", err)
+		return true, fmt.Errorf("calculating diff failed: %w", err)
 	}
 
-	err = r.addMissingUsers(ctx, client, userActions.missing)
+	retry, err = r.addMissingUsers(ctx, client, userActions.missing)
 	if err != nil {
-		return fmt.Errorf("add missing users failed: %w", err)
+		return true, fmt.Errorf("add missing users failed: %w", err)
 	}
+
 	err = r.changeUsers(ctx, client, userActions.change)
 	if err != nil {
-		return fmt.Errorf("changing present users failed: %w", err)
+		return true, fmt.Errorf("changing present users failed: %w", err)
 	}
 
 	err = r.removeObsoleteUsers(ctx, client, userActions.obsoleteIds)
 	if err != nil {
-		return fmt.Errorf("remove obsolete users failed: %w", err)
+		return true, fmt.Errorf("remove obsolete users failed: %w", err)
 	}
 
-	return nil
+	return
 }
 
 func (r *OrganizationReconciler) buildDesiredState(ctx context.Context, org *grafanav1.Organization) (map[email]grafanav1.OrganizationUser, error) {
@@ -142,7 +143,7 @@ func (err *orgUserAddError) Error() string {
 	return fmt.Sprintf("adding User (email: %s) to Organization (id: %d) failed: %s", err.Email, err.OrgID, err.error)
 }
 
-func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *gapi.Client, users []missingUserConfig) error {
+func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *gapi.Client, users []missingUserConfig) (retry bool, err error) {
 	logger := log.FromContext(ctx)
 
 	wg := sync.WaitGroup{}
@@ -154,6 +155,7 @@ func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *ga
 
 			_, err := client.UserByEmail(string(uc.Email))
 			if err != nil {
+				retry = true
 				// Need to have a user first to try to add to Org
 				return
 			}
@@ -176,9 +178,9 @@ func (r *OrganizationReconciler) addMissingUsers(ctx context.Context, client *ga
 		for _, err := range unreturned[1:] {
 			logger.Error(err.error, "adding User to Organization failed", "orgid", err.OrgID, "email", err.Email)
 		}
-		return unreturned[0]
+		return true, unreturned[0]
 	}
-	return nil
+	return
 }
 
 type orgUserError struct {
