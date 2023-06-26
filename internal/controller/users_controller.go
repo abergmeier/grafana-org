@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -271,10 +272,11 @@ func calculateUserBuckets(client *gapi.Client, adminLogin string, desired map[em
 			continue
 		}
 		currentUserMap[email(ou.Email)] = gapi.User{
-			ID:    ou.ID,
-			Email: ou.Email,
-			Name:  ou.Name,
-			Login: ou.Login,
+			ID:         ou.ID,
+			Email:      ou.Email,
+			Name:       ou.Name,
+			Login:      ou.Login,
+			AuthLabels: ou.AuthLabels,
 		}
 		obsoleteIds[ou.ID] = struct{}{}
 	}
@@ -283,9 +285,10 @@ func calculateUserBuckets(client *gapi.Client, adminLogin string, desired map[em
 		alreadyPresentUser, ok := currentUserMap[email]
 		if !ok {
 			users.missing = append(users.missing, gapi.User{
-				Email: string(email),
-				Name:  uc.Name,
-				Login: uc.Login,
+				Email:      string(email),
+				Name:       uc.Name,
+				Login:      uc.Login,
+				AuthLabels: uc.AuthLabels,
 			})
 			continue
 		}
@@ -297,6 +300,7 @@ func calculateUserBuckets(client *gapi.Client, adminLogin string, desired map[em
 			changed.Email = uc.Email
 			changed.Name = uc.Name
 			changed.Login = uc.Login
+			changed.AuthLabels = uc.AuthLabels
 			users.change = append(users.change, changed)
 		}
 	}
@@ -309,6 +313,24 @@ func calculateUserBuckets(client *gapi.Client, adminLogin string, desired map[em
 }
 
 func needsChange(lhs *grafanav1.User, current *gapi.User) bool {
+	if len(lhs.AuthLabels) != len(current.AuthLabels) {
+		return true
+	}
+
+	if len(lhs.AuthLabels) != 0 {
+		sort.Strings(lhs.AuthLabels)
+	}
+
+	if len(current.AuthLabels) != 0 {
+		sort.Strings(current.AuthLabels)
+	}
+
+	for i := 0; i != len(lhs.AuthLabels); i++ {
+		if lhs.AuthLabels[i] != current.AuthLabels[i] {
+			return true
+		}
+	}
+
 	return lhs.Email != current.Email || lhs.Login != current.Login || lhs.Name != current.Name
 }
 

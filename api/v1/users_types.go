@@ -15,9 +15,10 @@ type UserSpec struct {
 }
 
 type User struct {
-	Name  string `json:"name,omitempty"`
-	Login string `json:"login"`
-	Email string `json:"email,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	Login      string   `json:"login"`
+	Email      string   `json:"email,omitempty"`
+	AuthLabels []string `json:"authLabels,omitempty"`
 }
 
 // UserStatus defines the observed state of User
